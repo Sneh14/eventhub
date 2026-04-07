@@ -1,0 +1,270 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# CD – Production Deployment
+#
+# PURPOSE:
+#   Deploys the EventHub monorepo to the Ubuntu production server after every
+#   merge to `main`. Also triggerable manually from the GitHub UI.
+#
+# PIPELINE:
+#   pre-deploy-checks  → Reuses ci.yml (backend + frontend checks + drift check)
+#   deploy             → SSHes into server, writes .env, pulls code, builds, reloads PM2
+#
+# ZERO-DOWNTIME:
+#   `pm2 reload` performs a graceful restart — it brings up the new process
+#   before killing the old one. For cluster-mode apps this is truly zero-downtime.
+#   For fork-mode apps there is a brief gap (~1–2s). See PM2 docs for cluster setup.
+#
+# MIGRATION POLICY:
+#   Prisma migrations are NOT run automatically by this pipeline.
+#   If a release includes schema changes:
+#     1. SSH into the server manually BEFORE triggering deployment
+#     2. cd ~/eventhub/backend
+#     3. npx prisma migrate deploy
+#   This prevents accidental destructive migrations on production data.
+#
+# SECRETS REQUIRED (repo Settings → Secrets and variables → Actions):
+#   SERVER_HOST    – IP or hostname of the Ubuntu production server
+#   SERVER_USER    – SSH login user (e.g. ubuntu, deploy)
+#   SERVER_SSH_KEY – Full PEM-formatted private key contents
+#   BACKEND_ENV    – Full contents of backend/.env  (DATABASE_URL, JWT_SECRET, PORT, …)
+#   FRONTEND_ENV   – Full contents of frontend/.env (NEXT_PUBLIC_API_URL, …)
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: Deploy – Production
+
+on:
+  # Auto-deploy when code is merged (pushed) to main
+  push:
+    branches: [main]
+
+  # Allow on-demand deploys from the GitHub Actions UI
+  workflow_dispatch:
+
+# IMPORTANT: cancel-in-progress MUST be false for deployments.
+# Cancelling a live deploy mid-flight leaves the server in a broken half-deployed state.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '21.7.1'
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ╔═══════════════════════════════════════════════════════════════════════════
+  # ║  JOB 1 – PRE-DEPLOY CHECKS
+  # ║  Reuses the entire ci.yml workflow as a mandatory gate before deploying.
+  # ║  Deployment will not start unless ALL CI jobs pass.
+  # ╚═══════════════════════════════════════════════════════════════════════════
+  pre-deploy-checks:
+    name: Pre-deploy CI Checks
+    # Call the reusable CI workflow defined in ci.yml
+    uses: ./.github/workflows/ci.yml
+    # `secrets: inherit` passes all secrets from this workflow to ci.yml
+    # so it can perform the SSH-based schema drift check
+    secrets: inherit
+
+
+  # ╔═══════════════════════════════════════════════════════════════════════════
+  # ║  JOB 2 – DEPLOY
+  # ║  Runs only after ALL pre-deploy-checks jobs succeed.
+  # ╚═══════════════════════════════════════════════════════════════════════════
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: pre-deploy-checks   # Hard dependency — never deploy if checks fail
+
+    # Enabling an `environment` unlocks:
+    #   - Required reviewers (manual approval gate before deploy)
+    #   - Environment-specific secrets
+    #   - Deployment history and status in the GitHub UI
+    # Configure protection rules at: Settings → Environments → production
+    environment:
+      name: production
+      url: https://eventhub.rahulshettyacademy.com   # ← update with your actual URL
+
+    steps:
+      # ── Checkout (needed for workflow context, actual code comes via git pull) ──
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Configure SSH access ──────────────────────────────────────────────────
+      # Writes the deploy key and populates known_hosts so all subsequent SSH
+      # and SCP commands work non-interactively (BatchMode=yes).
+      - name: Configure SSH access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          echo "✓ SSH configured for ${{ secrets.SERVER_HOST }}"
+
+      # ── Write backend .env ────────────────────────────────────────────────────
+      # The BACKEND_ENV secret must contain the complete .env file contents, e.g.:
+      #   DATABASE_URL=mysql://user:pass@127.0.0.1:3306/eventhub
+      #   JWT_SECRET=your-very-long-random-secret
+      #   PORT=3001
+      #   NODE_ENV=production
+      #
+      # `printf '%s'` is used instead of `echo` to avoid appending a trailing
+      # newline and to safely handle values that contain special shell characters.
+      # The secret is read from an env var (never interpolated directly in the
+      # command) to prevent it appearing in process listings or runner logs.
+      - name: Write backend environment file to server
+        env:
+          BACKEND_ENV: ${{ secrets.BACKEND_ENV }}
+        run: |
+          printf '%s' "$BACKEND_ENV" | ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "cat > /home/ubuntu/eventhub/backend/.env"
+          echo "✓ backend/.env written"
+
+      # ── Write frontend .env ───────────────────────────────────────────────────
+      # The FRONTEND_ENV secret must contain the complete .env file contents, e.g.:
+      #   NEXT_PUBLIC_API_URL=https://api.your-domain.com
+      - name: Write frontend environment file to server
+        env:
+          FRONTEND_ENV: ${{ secrets.FRONTEND_ENV }}
+        run: |
+          printf '%s' "$FRONTEND_ENV" | ssh -i ~/.ssh/deploy_key \
+            -o BatchMode=yes \
+            -o ConnectTimeout=10 \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+            "cat > /home/ubuntu/eventhub/frontend/.env"
+          echo "✓ frontend/.env written"
+
+      # ── Deploy application ────────────────────────────────────────────────────
+      # All steps run in a single SSH session to minimise round-trips and ensure
+      # atomic failure — if any step fails, `set -euo pipefail` aborts immediately.
+      #
+      # Single-quoted heredoc ('REMOTE_EOF') means NO local variable expansion;
+      # every $VAR resolves on the remote server.
+      - name: Deploy application on server
+        run: |
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              -o ConnectTimeout=30 \
+              -o StrictHostKeyChecking=yes \
+              "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" << 'REMOTE_EOF'
+            set -euo pipefail
+
+            # ── Config ───────────────────────────────────────────────────────────
+            # Use the absolute path — ~ resolves to /home/ghactions, not /home/ubuntu
+            DEPLOY_PATH=/home/ubuntu/eventhub
+
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo " EventHub → Production Deployment"
+            echo " Server  : $(hostname)"
+            echo " Date    : $(date '+%Y-%m-%d %H:%M:%S %Z')"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+            # ── Step 1: Pull latest code ─────────────────────────────────────────
+            echo ""
+            echo ">>> [1/6] Pulling latest code from origin/main..."
+            cd "$DEPLOY_PATH"
+
+            # `git fetch --all` gets all remote refs.
+            # `git reset --hard origin/main` discards any local divergence and
+            # sets HEAD to the exact commit that triggered this deploy.
+            # .env files are gitignored so they are NOT overwritten by this reset.
+            git fetch --all --prune
+            git reset --hard origin/main
+
+            COMMIT_SHA=$(git rev-parse --short HEAD)
+            COMMIT_MSG=$(git log -1 --pretty=format:'%s')
+            echo "    Deployed commit : $COMMIT_SHA"
+            echo "    Commit message  : $COMMIT_MSG"
+
+            # ── Step 2: Backend – install dependencies ───────────────────────────
+            echo ""
+            echo ">>> [2/6] Installing backend dependencies..."
+            cd "$DEPLOY_PATH/backend"
+
+            # `npm ci` does a clean install from package-lock.json.
+            # This guarantees a deterministic dependency tree identical to CI.
+            npm ci
+            echo "    ✓ Backend node_modules installed"
+
+            # ── Step 3: Backend – Prisma generate ───────────────────────────────
+            echo ""
+            echo ">>> [3/6] Generating Prisma client..."
+            # Regenerate the Prisma Client to match the current schema.prisma.
+            # This is required on every deploy — the generated client must always
+            # match the schema version in the deployed code.
+            #
+            # ⚠️  MIGRATIONS ARE INTENTIONALLY NOT RUN HERE.
+            # If this release contains schema changes, you must manually run:
+            #   cd /home/ubuntu/eventhub/backend && npx prisma migrate deploy
+            # BEFORE triggering this deployment workflow.
+            npx prisma generate
+            echo "    ✓ Prisma client generated"
+
+            # ── Step 4: Frontend – install dependencies ──────────────────────────
+            echo ""
+            echo ">>> [4/6] Installing frontend dependencies..."
+            cd "$DEPLOY_PATH/frontend"
+            npm ci
+            echo "    ✓ Frontend node_modules installed"
+
+            # ── Step 5: Frontend – production build ──────────────────────────────
+            echo ""
+            echo ">>> [5/6] Building Next.js frontend for production..."
+            # `next build` compiles and optimises the application.
+            # The .env file (written in the previous GitHub Actions step) is read
+            # here so NEXT_PUBLIC_* variables are baked into the static output.
+            NEXT_TELEMETRY_DISABLED=1 npm run build
+            echo "    ✓ Frontend build complete"
+
+            # ── Step 6: Reload PM2 processes ────────────────────────────────────
+            echo ""
+            echo ">>> [6/6] Reloading PM2 processes (zero-downtime)..."
+
+            # PM2 is owned by the ubuntu user. ghactions has sudo rights to run
+            # the eventhub-pm2-reload wrapper script AS ubuntu (see sudoers setup).
+            # The wrapper script handles: reload → fallback restart → save for both processes.
+            sudo -u ubuntu /usr/local/bin/eventhub-pm2-reload
+
+            echo ""
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo " ✓ Deployment complete!  Commit: $COMMIT_SHA"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          REMOTE_EOF
+
+      # ── Show PM2 status ───────────────────────────────────────────────────────
+      # Prints the final PM2 process table in the Actions log so you can confirm
+      # both processes are "online" after the deploy.
+      - name: Show PM2 status
+        if: always()   # Run even if previous steps failed — useful for debugging
+        run: |
+          echo "=== PM2 Process Status ==="
+          ssh -i ~/.ssh/deploy_key \
+              -o BatchMode=yes \
+              -o ConnectTimeout=10 \
+              "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+              "sudo -u ubuntu /usr/local/bin/eventhub-pm2-status"
+
+      # ── Deployment summary ────────────────────────────────────────────────────
+      - name: Deployment summary
+        if: success()
+        run: |
+          echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Commit** | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ github.ref_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Triggered by** | @${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Workflow run** | [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment failure notice
+        if: failure()
+        run: |
+          echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Check the logs above to identify the failed step." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Rollback instructions:** See the rollback guide in the repository README." >> $GITHUB_STEP_SUMMARY

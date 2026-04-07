@@ -1,0 +1,326 @@
+# ══════════════════════════════════════════════════════════════════════════════
+# CI – Pull Request Checks
+#
+# PURPOSE:
+#   Validates every pull request targeting `main` before it can be merged.
+#   Also callable as a reusable workflow by deploy.yml (workflow_call trigger)
+#   so that the exact same checks run as a mandatory pre-deploy gate.
+#
+# JOBS (run in parallel unless noted):
+#   backend-checks  – dependency install, JS syntax, Prisma validate/format/generate
+#   schema-drift    – SSHes into production server, runs prisma migrate diff (read-only)
+#                     depends on: backend-checks
+#   frontend-checks – dependency install, TypeScript type-check, production build
+#
+# SECRETS REQUIRED (configured in repo Settings → Secrets and variables → Actions):
+#   SERVER_HOST     – IP or hostname of the production Ubuntu server
+#   SERVER_USER     – SSH user (e.g. ubuntu, deploy)
+#   SERVER_SSH_KEY  – PEM-formatted private SSH key (the full contents of id_rsa / id_ed25519)
+# ══════════════════════════════════════════════════════════════════════════════
+
+name: CI – Pull Request Checks
+
+on:
+  # Run on every PR that targets main (opened, new commits pushed, reopened)
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+  # Allow developers to trigger a run manually from the GitHub UI
+  workflow_dispatch:
+
+  # Allow deploy.yml to reuse this entire workflow as a pre-deploy gate
+  # `secrets: inherit` in the caller passes all caller secrets here automatically
+  workflow_call:
+    secrets:
+      SERVER_HOST:
+        required: true
+      SERVER_USER:
+        required: true
+      SERVER_SSH_KEY:
+        required: true
+
+# Cancel any in-progress run for the same branch when a new push arrives.
+# This avoids wasting runner minutes on outdated commits.
+# NOTE: deploy.yml sets cancel-in-progress: false to never abort live deployments.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '21.7.1'
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  # ╔═══════════════════════════════════════════════════════════════════════════
+  # ║  JOB 1 – BACKEND CHECKS
+  # ║  Validates the Node.js/Express backend without connecting to a database.
+  # ╚═══════════════════════════════════════════════════════════════════════════
+  backend-checks:
+    name: Backend Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Node.js setup with npm cache ─────────────────────────────────────────
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          # Cache key is scoped to the backend lockfile so a lockfile change
+          # automatically busts the cache
+          cache-dependency-path: backend/package-lock.json
+
+      # ── Install dependencies ──────────────────────────────────────────────────
+      # `npm ci` does a clean install from package-lock.json and fails if the
+      # lockfile is out of sync with package.json (catches uncommitted lockfile changes)
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      # ── JavaScript syntax check ───────────────────────────────────────────────
+      # The backend is plain JavaScript (no tsconfig.json).
+      # `node --check` parses and validates syntax without executing the file.
+      # This catches syntax errors, malformed imports, and parse failures.
+      - name: JavaScript syntax check
+        run: |
+          echo "Checking entry points for syntax errors..."
+          node --check server.js
+          node --check app.js
+          echo "✓ Syntax check passed"
+        working-directory: backend
+
+      # ── Prisma schema validation ──────────────────────────────────────────────
+      # `prisma validate` checks that schema.prisma is structurally correct:
+      # valid model names, supported field types, correct relation definitions.
+      # Does NOT connect to the database.
+      - name: Prisma schema validate
+        run: |
+          echo "Validating Prisma schema..."
+          npx prisma validate
+          echo "✓ Prisma schema is valid"
+        working-directory: backend
+        env:
+          # A placeholder DATABASE_URL satisfies Prisma's env-var requirement
+          # without needing a real database connection for this step
+          DATABASE_URL: "mysql://ci:ci@localhost:3306/ci_placeholder"
+
+      # ── Prisma format check ───────────────────────────────────────────────────
+      # Prisma's `format` command normalises schema.prisma formatting.
+      # Strategy: run format (which modifies the file if needed), then fail the
+      # job if git reports any changes — meaning the committed schema was not
+      # pre-formatted. Developers must run `npx prisma format` locally.
+      - name: Prisma schema format check
+        run: |
+          echo "Checking Prisma schema formatting..."
+          npx prisma format
+          if ! git diff --exit-code -- prisma/schema.prisma; then
+            echo ""
+            echo "::error file=backend/prisma/schema.prisma::Schema is not formatted."
+            echo "Run 'cd backend && npx prisma format' locally and commit the result."
+            exit 1
+          fi
+          echo "✓ Prisma schema formatting is correct"
+        working-directory: backend
+        env:
+          DATABASE_URL: "mysql://ci:ci@localhost:3306/ci_placeholder"
+
+      # ── Prisma generate ───────────────────────────────────────────────────────
+      # Generates the Prisma Client from schema.prisma.
+      # Does NOT connect to the database — only reads the schema file.
+      # This ensures the generated client will match the schema in this PR.
+      - name: Prisma generate client
+        run: |
+          echo "Generating Prisma client..."
+          npx prisma generate
+          echo "✓ Prisma client generated successfully"
+        working-directory: backend
+        env:
+          DATABASE_URL: "mysql://ci:ci@localhost:3306/ci_placeholder"
+
+
+  # ╔═══════════════════════════════════════════════════════════════════════════
+  # ║  JOB 2 – SCHEMA DRIFT CHECK
+  # ║
+  # ║  WHY we SCP the prisma/ folder instead of using the server's code:
+  # ║  If we SSH in and run diff against /home/ubuntu/eventhub/backend/prisma,
+  # ║  we're checking the CURRENTLY DEPLOYED migrations — any new migration files
+  # ║  added by THIS PR are invisible to the check. By uploading the PR's prisma/
+  # ║  folder first, we compare THIS commit's migration history against the live DB.
+  # ║
+  # ║  Flow:
+  # ║    1. Checkout PR code on runner
+  # ║    2. SCP backend/prisma/ → temp dir on server
+  # ║    3. SSH: run prisma migrate diff
+  # ║         --from-schema-datasource (actual DB) --to-schema-datamodel (PR schema)
+  # ║         cd to backend dir first so Prisma reads DATABASE_URL from .env
+  # ║         No shadow DB required — fully read-only on the production DB
+  # ║    4. Cleanup temp dir (always, even on failure)
+  # ║
+  # ║  Depends on: backend-checks (only runs if backend is valid)
+  # ╚═══════════════════════════════════════════════════════════════════════════
+  schema-drift:
+    name: Schema Drift Check (PR schema vs Production DB)
+    runs-on: ubuntu-latest
+    needs: backend-checks   # Skip if backend checks fail – saves SSH round-trip
+
+    steps:
+      # Checkout is required here so the runner has the PR's prisma/ folder to upload
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Configure SSH access ──────────────────────────────────────────────────
+      - name: Configure SSH access
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.SERVER_HOST }}" >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+          echo "✓ SSH configured"
+
+      # ── Upload PR's prisma/ folder to a temp dir on the server ────────────────
+      # mktemp -d creates a unique dir so concurrent CI runs never collide.
+      - name: Upload PR schema to server
+        run: |
+          TEMP_DIR=$(
+            ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+                "mktemp -d /tmp/prisma-ci-XXXXXX"
+          )
+          echo "TEMP_DIR=$TEMP_DIR" >> "$GITHUB_ENV"
+          echo "Uploading PR prisma/ to server: $TEMP_DIR"
+
+          scp -i ~/.ssh/deploy_key -o BatchMode=yes -q -r \
+            backend/prisma \
+            "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}:${TEMP_DIR}/"
+          echo "✓ backend/prisma/ uploaded"
+
+      # ── Run prisma migrate diff (read-only) ───────────────────────────────────
+      # WHY this flag combination (not --from-migrations):
+      #   --from-migrations requires --shadow-database-url so Prisma can replay
+      #   migrations into a temporary DB — we don't have a shadow DB in CI.
+      #
+      # Instead we use:
+      #   --from-schema-datasource : connects to the ACTUAL production DB via
+      #                              DATABASE_URL loaded from backend/.env (cwd)
+      #   --to-schema-datamodel    : uses the PR's schema.prisma model definitions
+      #                              as the desired target state
+      #
+      # This answers: "does the production DB already match what this PR's
+      # schema.prisma expects?" — no shadow DB required, fully read-only.
+      #
+      # --exit-code : 0 = no diff (DB matches PR schema), 1 = diff found
+      - name: Run schema drift check
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes \
+              "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+              "set -euo pipefail
+               cd /home/ubuntu/eventhub/backend
+
+               # Prisma 5 parses the schema in a WASM sandbox that reads DATABASE_URL
+               # from process.env — it does NOT load .env relative to the cwd, only
+               # relative to the schema file path (/tmp/.../prisma/).
+               # set -a exports every variable sourced from .env into the shell
+               # environment so the npx subprocess inherits DATABASE_URL.
+               set -a && source /home/ubuntu/eventhub/backend/.env && set +a
+
+               echo '=== Schema Drift Check: production DB vs PR schema ==='
+               echo 'PR schema : ${{ env.TEMP_DIR }}/prisma/schema.prisma'
+               echo ''
+
+               npx prisma migrate diff \
+                 --from-schema-datasource ${{ env.TEMP_DIR }}/prisma/schema.prisma \
+                 --to-schema-datamodel    ${{ env.TEMP_DIR }}/prisma/schema.prisma \
+                 --exit-code \
+                 && echo '✓ No drift: production DB matches PR schema' \
+                 || {
+                   echo ''
+                   echo '✗ DB does not match the PR schema.'
+                   echo '  Possible causes:'
+                   echo '  1. PR adds new schema changes with pending migrations.'
+                   echo '     Apply them manually before merging:'
+                   echo '       ssh server'
+                   echo '       cd /home/ubuntu/eventhub/backend'
+                   echo '       npx prisma migrate deploy'
+                   echo '  2. DB was manually altered outside of Prisma migrations.'
+                   echo '     Investigate the diff output above and reconcile.'
+                   exit 1
+                 }"
+
+      # ── Cleanup ───────────────────────────────────────────────────────────────
+      # Always remove the temp dir — runs even when the drift check fails.
+      - name: Cleanup temp dir on server
+        if: always()
+        run: |
+          if [ -n "${{ env.TEMP_DIR }}" ]; then
+            ssh -i ~/.ssh/deploy_key -o BatchMode=yes -o StrictHostKeyChecking=yes \
+                "${{ secrets.SERVER_USER }}@${{ secrets.SERVER_HOST }}" \
+                "rm -rf ${{ env.TEMP_DIR }}" || true
+            echo "✓ Cleaned up ${{ env.TEMP_DIR }}"
+          fi
+
+
+  # ╔═══════════════════════════════════════════════════════════════════════════
+  # ║  JOB 3 – FRONTEND CHECKS
+  # ║  Validates the Next.js TypeScript frontend: type safety + production build.
+  # ║  Runs in PARALLEL with backend-checks for faster overall CI time.
+  # ╚═══════════════════════════════════════════════════════════════════════════
+  frontend-checks:
+    name: Frontend Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ─────────────────────────────────────────────────────────────
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ── Node.js setup with npm cache ─────────────────────────────────────────
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      # ── Install dependencies ──────────────────────────────────────────────────
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: frontend
+
+      # ── TypeScript type check ─────────────────────────────────────────────────
+      # `tsc --noEmit` runs the TypeScript compiler in check-only mode.
+      # It reports ALL type errors without emitting any JavaScript output.
+      # Uses the tsconfig.json already present in the frontend directory.
+      - name: TypeScript type check
+        run: |
+          echo "Running TypeScript type check..."
+          npx tsc --noEmit
+          echo "✓ No TypeScript errors found"
+        working-directory: frontend
+
+      # ── Production build ──────────────────────────────────────────────────────
+      # A full `next build` catches:
+      #   - Import resolution errors (missing modules, wrong paths)
+      #   - Static generation failures (getStaticProps / generateStaticParams errors)
+      #   - Invalid page exports
+      #   - Build-time environment variable usage
+      #
+      # NEXT_TELEMETRY_DISABLED=1 prevents Next.js from sending analytics during CI.
+      # NEXT_PUBLIC_API_URL uses a placeholder — real value comes from .env on server.
+      - name: Production build check
+        run: |
+          echo "Building Next.js for production..."
+          npm run build
+          echo "✓ Production build succeeded"
+        working-directory: frontend
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          # Placeholder value for build-time validation.
+          # The real API URL is injected from FRONTEND_ENV secret during deployment.
+          NEXT_PUBLIC_API_URL: http://localhost:3001

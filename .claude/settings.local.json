@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find ~/Desktop -name \"*.png\" -newer ~/Desktop/\"Screenshot 2025-07-02 at 5.28.21 PM.png\" 2>/dev/null | head -10)",
+      "Bash(git add backend/app.js frontend/app/login/page.tsx frontend/public/app-preview.png && git log --oneline -3)",
+      "Bash(git commit -m \"$\\(cat <<'EOF'\nfeat: add app preview on login page with backend-controlled explore links\n\n- Add app screenshot to login page left panel \\(shown before marketing content\\)\n- Move title/description above the login form on the right side\n- Add GET /api/config endpoint returning feature flags \\(showExploreLinks\\)\n- Explore CTA buttons shown/hidden based on SHOW_EXPLORE_LINKS env var\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push origin main)",
+      "Bash(git add backend/.env.example && git commit -m \"$\\(cat <<'EOF'\nchore: document SHOW_EXPLORE_LINKS feature flag in .env.example\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\nEOF\n\\)\" && git push origin main)",
+      "Bash(npm install -D @playwright/test 2>&1 | tail -5)",
+      "Bash(npx playwright install chromium 2>&1 | tail -5)",
+      "Bash(claude mcp add --transport stdio playwright -- npx -y @playwright/mcp@latest)",
+      "Bash(claude mcp list)",
+      "Bash(npx playwright test tests/sandbox-banner.spec.ts --reporter=line 2>&1)",
+      "Bash(npx playwright test tests/cross-user-booking.spec.ts --reporter=line 2>&1)",
+      "Bash(curl -s -X POST http://localhost:3001/api/auth/login -H \"Content-Type: application/json\" -d '{\"email\":\"rahulshetty@yahoo.com\",\"password\":\"123456\"}' | python3 -m json.tool 2>&1)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOjQsImVtYWlsIjoicmFodWxzaGV0dHlAeWFob28uY29tIiwiaWF0IjoxNzcxOTI5Mzc5LCJleHAiOjE3NzI1MzQxNzl9.BRihCy3l8b39RHPs7TMy6659Lu62I2zPJFfbWTAUW1M\"\ncurl -s http://localhost:3001/api/bookings -H \"Authorization: Bearer $TOKEN\" | python3 -m json.tool 2>&1)",
+      "Bash(cat /Users/rahulshetty/vibe/eventhub/package.json && cat /Users/rahulshetty/vibe/eventhub/backend/package.json | python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('Backend scripts:', list\\(d.get\\('scripts',{}\\).keys\\(\\)\\)\\)\")",
+      "Bash(npx playwright test 2>&1 | tail -100)",
+      "Bash(npx playwright test 2>&1 | head -80)",
+      "Bash(cd /Users/rahulshetty/vibe/eventhub/backend && node prisma/seed.js 2>&1)",
+      "Bash(node prisma/seed.js 2>&1)",
+      "Bash(git add \\\\\n  backend/src/controllers/bookingController.js \\\\\n  backend/src/repositories/bookingRepository.js \\\\\n  backend/src/routes/bookingRoutes.js \\\\\n  backend/src/services/bookingService.js \\\\\n  frontend/app/bookings/page.tsx \\\\\n  frontend/lib/api/bookings.ts \\\\\n  tests/booking-flow.spec.js \\\\\n  tests/refund-eligibility.spec.js \\\\\n  tests/sandbox-banner.spec.js \\\\\n  tests/cross-user-booking.spec.js\ngit rm tests/booking-flow.spec.ts tests/refund-eligibility.spec.ts tests/sandbox-banner.spec.ts)",
+      "Bash(git commit -m \"$\\(cat <<'EOF'\nfeat: add clear all bookings, update booking-flow test to create event via UI\n\n- Add DELETE /api/bookings endpoint to clear all bookings for current user \\(repo, service, controller, route\\)\n- Add clearAll\\(\\) to frontend bookings API client\n- Move clear all bookings link to top of My Bookings page next to heading with test data note\n- Update booking-flow.spec.js to create a new event via admin UI before booking, then dynamically locate it on the events page by title using filter\\({ hasText }\\)\n\nCo-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git pull --rebase origin main)",
+      "Bash(git stash && git pull --rebase origin main && git stash pop)",
+      "mcp__playwright__browser_navigate",
+      "Bash(npx playwright test tests/booking-management.spec.js --reporter=line 2>&1)",
+      "Bash(npx playwright test tests/booking-management.spec.js --headed --reporter=line 2>&1)"
+    ]
+  }
+}
