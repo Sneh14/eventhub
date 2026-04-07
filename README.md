@@ -1,8 +1,17 @@
-# EventHub — AI-Powered QA Automation Platform
+# 🤖 AI-Native QA Automation Platform
 
 > Built an AI-powered QA automation platform using **Claude Code multi-agent orchestration** — 4 specialized skill agents (scenario generation, test strategy, test generation, code review) that read domain knowledge, live source code, and business rules before producing output; generated **53 test scenarios stratified across a proper test pyramid** (unit / API / component / E2E) for a full-stack **Next.js + Express + MySQL** application.
 
 **Built by [Snehal Patil](https://www.linkedin.com/in/snehal-patil-69654953/) · Senior SDET / AI-Native QA Automation Engineer**
+
+---
+
+## Business Impact
+
+- Reduced manual test design effort by using specialized AI agents to generate scenarios, assign the right test layer, and produce executable tests.
+- Improved test relevance by grounding generation in business rules, live source code, UI selectors, API contracts, and existing tests.
+- Enforced a healthy test pyramid by distributing coverage across unit, API, component, and E2E layers instead of overloading UI tests.
+- Increased confidence in critical workflows such as authentication, booking rules, seat allocation, and cross-user security through specification-driven validation.
 
 ---
 
@@ -124,7 +133,7 @@ Scenarios follow a structured taxonomy:
 
 ## The system under test
 
-EventHub is a real, production-quality ticket booking application — not a toy. It gives the agents meaningful complexity: layered architecture, business rules with edge cases, security boundaries, and client-side state machines.
+EventHub is a real, production-quality ticket booking application. It gives the agents meaningful complexity: layered architecture, business rules with edge cases, security boundaries, and client-side state machines.
 
 ### Tech stack
 
