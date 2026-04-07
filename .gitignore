@@ -26,4 +26,7 @@ Thumbs.db
 .vscode/
 .idea/
 
-
+#Reports
+playwright-report/
+test-results/
+blob-report/
