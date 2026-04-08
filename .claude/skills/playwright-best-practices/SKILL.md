@@ -145,8 +145,8 @@ import { test, expect } from '@playwright/test';
 const BASE_URL = 'http://localhost:3000';
 
 // Credentials as constants at top
-const USER_EMAIL = 'rahulshetty1@gmail.com';
-const USER_PASSWORD = 'Magiclife1!';
+const USER_EMAIL = 'snehal1415.patil@gmail.com';
+const USER_PASSWORD = 'Passport1$';
 
 // Reusable helpers
 async function login(page) {

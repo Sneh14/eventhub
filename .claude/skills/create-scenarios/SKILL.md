@@ -35,7 +35,7 @@ For every feature/flow in the domain skill, apply ALL 6 lenses:
 | UI State | Are there conditional displays, loading states, empty states? |
 
 ## Output Format
-Write to **`docs/test-scenarios.md`** (consumed by `/test-strategy` skill). Use this template:
+Write to **`docs/scenarios/<feature-name>.md`** where `<feature-name>` is derived from `$ARGUMENTS` in kebab-case (e.g. `event-management`, `booking-flow`). If no argument provided, write to `docs/scenarios/full-suite.md`. This file is consumed by the `/test-strategy` skill. Use this template:
 
 ```
 ### TC-<NNN>: <Title>

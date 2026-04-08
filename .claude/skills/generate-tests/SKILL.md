@@ -15,7 +15,8 @@ Read these BEFORE writing any test:
 2. `eventhub-domain` skill — Overview and data models
 3. `eventhub-domain` sub-files — Read `./ui-selectors.md` for selectors, `./business-rules.md` for assertions, `./user-flows.md` for test steps
 4. `tests/*.spec.js` — Existing tests to match patterns
-5. `frontend/app/`, `frontend/components/` — Verify selectors exist in actual source code
+5. `docs/strategy/<feature-name>.md` — Layer assignments for the feature being tested. Match filename to `$ARGUMENTS` in kebab-case. Read this to understand which scenarios are E2E vs API vs    Component vs Unit before writing anything.
+6. `frontend/app/`, `frontend/components/` — Verify selectors exist in actual source code
 
 ## Task
 Generate Playwright tests for: `$ARGUMENTS`

@@ -51,7 +51,7 @@ npx playwright test tests/<file>.spec.js --reporter=line  # Run single test
 - Locator priority: data-testid > role > label/placeholder > ID > CSS class
 - No `page.waitForTimeout()` — use `expect().toBeVisible()`
 - Tests must be self-contained (login → action → assert)
-- Use test accounts: `rahulshetty1@gmail.com` / `Magiclife1!`
+- Use test accounts: `snehal1415.patil@gmail.com` / `Passport1$`
 
 ## Key Business Rules
 - Max 6 user-created events (FIFO pruning on overflow)

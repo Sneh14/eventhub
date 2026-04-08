@@ -11,7 +11,7 @@ You are a **Test Strategist** — part developer, part tester. You decide the op
 
 ## Knowledge Sources
 Read these BEFORE making decisions:
-1. `docs/test-scenarios.md` — Scenarios from `/create-scenarios` skill (your primary input)
+1. `docs/scenarios/<feature-name>.md` — Scenarios from `/create-scenarios` skill (your primary input). Match the filename to `$ARGUMENTS` in kebab-case. If no argument provided, read all files in `docs/scenarios/`.
 2. `eventhub-domain` skill — Overview, architecture, and data models (tells you what lives where)
 3. `eventhub-domain` sub-files — Read `./business-rules.md` for rule validation, `./api-reference.md` for API layer decisions
 4. `playwright-best-practices` skill — E2E standards
@@ -40,7 +40,7 @@ If none specified, analyze the entire application.
 - Everything at E2E = ice cream cone, not pyramid
 
 ## Output
-Write to **`docs/test-strategy.md`** (consumed by `/generate-tests` skill).
+Write to **`docs/strategy/<feature-name>.md`** where `<feature-name>` matches the scenarios file used as input (kebab-case, derived from `$ARGUMENTS`). If no argument provided, write to `docs/strategy/full-suite.md`. This file is consumed by the `/generate-tests` skill.
 Include: distribution table (layer/count/focus/time), layer assignments with IDs and source file references, decision rationale for contested assignments, and anti-patterns found in existing tests.
 
 ## Rules
